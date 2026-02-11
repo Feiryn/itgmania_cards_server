@@ -1,0 +1,9 @@
+[default]
+# Use `openssl rand -base64 32` to generate a new secret
+secret_key = "ihacgUDNb2VY6F8BwQKkhFHFqMfeFNBiWIKydizSTcg="
+address = "0.0.0.0"
+port = 8000
+
+[default.limits]
+data-form = "10Mib"
+file = "10Mib"
