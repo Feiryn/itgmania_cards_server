@@ -1,16 +1,17 @@
-use rocket::{get, post, routes, uri, Build, State};
-use rocket::form::Form;
-use rocket::response::{content::RawHtml, Redirect, Flash};
-use rocket::http::CookieJar;
-use rocket::request::FlashMessage;
-use rocket::FromForm;
-use rocket::fs::{NamedFile, TempFile};
-use std::path::PathBuf;
-use crate::auth::{AuthenticatedUser, verify_password, set_auth_cookie, remove_auth_cookie};
+use crate::accounts::{self, UpdateAccountDetails};
+use crate::auth::{AuthenticatedUser, remove_auth_cookie, set_auth_cookie, verify_password};
+use crate::cards::card_type::CardType;
+use crate::cards::cards_manager;
 use crate::config::Config;
 use crate::templates::Templates;
-use crate::accounts::{self, UpdateAccountDetails};
-use crate::cards_manager;
+use rocket::FromForm;
+use rocket::form::Form;
+use rocket::fs::{NamedFile, TempFile};
+use rocket::http::CookieJar;
+use rocket::request::FlashMessage;
+use rocket::response::{Flash, Redirect, content::RawHtml};
+use rocket::{Build, State, get, post, routes, uri};
+use std::path::PathBuf;
 
 #[derive(FromForm)]
 struct LoginForm {
@@ -19,6 +20,7 @@ struct LoginForm {
 
 #[derive(FromForm)]
 struct CreateAccountForm<'r> {
+    card_type: String,
     card_number: String,
     display_name: String,
     display_name_four_letters: String,
@@ -60,18 +62,26 @@ async fn render_home_page(templates: &Templates, message: Option<(&str, bool)>) 
     let player2_card = cards_manager::get_current_card_number_player2().await;
     let cards_enabled = cards_manager::is_enabled().await;
 
-    let player1_content = if let Some(card_num) = &player1_card {
+    // Build profile names (e.g. "MIFARE_12345678") from the (CardType, card_id) pairs
+    let player1_profile = player1_card
+        .as_ref()
+        .map(|(ct, cid)| format!("{}_{}", ct.to_string(), cid));
+    let player2_profile = player2_card
+        .as_ref()
+        .map(|(ct, cid)| format!("{}_{}", ct.to_string(), cid));
+
+    let player1_content = if let Some(ref card_num) = player1_profile {
         if let Some(details) = accounts::get_account_details(card_num) {
             format!(
                 r#"<div class="slot-card">
                     <strong>{}</strong>
-                    <small>Card: {}</small>
+                    <small>{} {}</small>
                 </div>
                 <form method="post" action="/cards/remove">
                     <input type="hidden" name="player" value="1">
                     <button type="submit" class="btn btn-danger btn-small" style="width: 100%;">Remove Card</button>
                 </form>"#,
-                details.display_name, details.card_number
+                details.display_name, details.card_type, details.card_id
             )
         } else {
             r#"<div class="slot-empty">No card inserted</div>"#.to_string()
@@ -80,18 +90,18 @@ async fn render_home_page(templates: &Templates, message: Option<(&str, bool)>) 
         r#"<div class="slot-empty">No card inserted</div>"#.to_string()
     };
 
-    let player2_content = if let Some(card_num) = &player2_card {
+    let player2_content = if let Some(ref card_num) = player2_profile {
         if let Some(details) = accounts::get_account_details(card_num) {
             format!(
                 r#"<div class="slot-card">
                     <strong>{}</strong>
-                    <small>Card: {}</small>
+                    <small>{} {}</small>
                 </div>
                 <form method="post" action="/cards/remove">
                     <input type="hidden" name="player" value="2">
                     <button type="submit" class="btn btn-danger btn-small" style="width: 100%;">Remove Card</button>
                 </form>"#,
-                details.display_name, details.card_number
+                details.display_name, details.card_type, details.card_id
             )
         } else {
             r#"<div class="slot-empty">No card inserted</div>"#.to_string()
@@ -102,7 +112,11 @@ async fn render_home_page(templates: &Templates, message: Option<(&str, bool)>) 
 
     // Render message if present
     let message_html = if let Some((msg, is_success)) = message {
-        let class = if is_success { "message-success" } else { "message-error" };
+        let class = if is_success {
+            "message-success"
+        } else {
+            "message-error"
+        };
         format!(r#"<div class="message {}">{}</div>"#, class, msg)
     } else {
         String::new()
@@ -127,13 +141,21 @@ async fn render_home_page(templates: &Templates, message: Option<(&str, bool)>) 
                 r#"<span class="badge badge-secondary">None</span>"#
             };
 
-            let is_in_p1 = player1_card.as_ref().map_or(false, |c| c == &account.card_number);
-            let is_in_p2 = player2_card.as_ref().map_or(false, |c| c == &account.card_number);
+            let is_in_p1 = player1_profile
+                .as_ref()
+                .map_or(false, |p| p == &account.card_number);
+            let is_in_p2 = player2_profile
+                .as_ref()
+                .map_or(false, |p| p == &account.card_number);
 
             let insert_buttons = if is_in_p1 || is_in_p2 {
-                format!(r#"<span style="font-size: 11px; color: #4caf50;">✓ In use (P{})</span>"#, if is_in_p1 { "1" } else { "2" })
+                format!(
+                    r#"<span style="font-size: 11px; color: #4caf50;">✓ In use (P{})</span>"#,
+                    if is_in_p1 { "1" } else { "2" }
+                )
             } else if !cards_enabled {
-                r#"<span style="font-size: 11px; color: #999;">🔒 Cards disabled</span>"#.to_string()
+                r#"<span style="font-size: 11px; color: #999;">🔒 Cards disabled</span>"#
+                    .to_string()
             } else {
                 format!(
                     r#"<form method="post" action="/cards/insert" style="display: inline;">
@@ -149,11 +171,20 @@ async fn render_home_page(templates: &Templates, message: Option<(&str, bool)>) 
                     account.card_number, account.card_number
                 )
             };
-            
+
             let avatar_html = if account.avatar_path.is_some() {
-                format!(r#"<img src="/avatars/{}" alt="Avatar" class="avatar-img">"#, account.card_number)
+                format!(
+                    r#"<img src="/avatars/{}" alt="Avatar" class="avatar-img">"#,
+                    account.card_number
+                )
             } else {
                 r#"<div class="avatar-placeholder">👤</div>"#.to_string()
+            };
+
+            let card_type_badge = match account.card_type.as_str() {
+                "MIFARE" => r#"<span class="badge badge-mifare">MIFARE</span>"#,
+                "FELICA" => r#"<span class="badge badge-felica">FELICA</span>"#,
+                _ => r#"<span class="badge badge-secondary">UNKNOWN</span>"#,
             };
 
             table_rows.push_str(&format!(
@@ -161,13 +192,14 @@ async fn render_home_page(templates: &Templates, message: Option<(&str, bool)>) 
                     <td>{}</td>
                     <td><strong>{}</strong></td>
                     <td>{}</td>
+                    <td>{}</td>
                     <td><code>{}</code></td>
                     <td>{}</td>
                     <td><small>{}</small></td>
                     <td>{}</td>
                     <td>
                         <div class="actions">
-                            <button class="btn btn-small" onclick="openEditModal('{}', '{}', '{}')">✏️ Edit</button>
+                            <button class="btn btn-small" onclick="openEditModal('{}', '{}', '{}', '{}')">✏️ Edit</button>
                             <button class="btn btn-danger btn-small" onclick="deleteAccount('{}', '{}')">🗑️ Delete</button>
                         </div>
                     </td>
@@ -175,13 +207,15 @@ async fn render_home_page(templates: &Templates, message: Option<(&str, bool)>) 
                 avatar_html,
                 account.display_name,
                 account.display_name_four_letters,
-                account.card_number,
+                card_type_badge,
+                account.card_id,
                 gs_badge,
                 account.last_played_date,
                 insert_buttons,
                 escape_quotes(&account.card_number),
                 escape_quotes(&account.display_name),
                 escape_quotes(&account.display_name_four_letters),
+                escape_quotes(&account.card_type),
                 escape_quotes(&account.card_number),
                 escape_quotes(&account.display_name)
             ));
@@ -194,7 +228,8 @@ async fn render_home_page(templates: &Templates, message: Option<(&str, bool)>) 
                         <th>Avatar</th>
                         <th>Display Name</th>
                         <th>Short</th>
-                        <th>Card Number</th>
+                        <th>Card Type</th>
+                        <th>Card ID</th>
                         <th>GrooveStats API Key</th>
                         <th>Last Played</th>
                         <th>Insert Card</th>
@@ -209,7 +244,8 @@ async fn render_home_page(templates: &Templates, message: Option<(&str, bool)>) 
         )
     };
 
-    let html = templates.home
+    let html = templates
+        .home
         .replace("PLAYER1_CONTENT", &player1_content)
         .replace("PLAYER2_CONTENT", &player2_content)
         .replace("MESSAGE_PLACEHOLDER", &message_html)
@@ -224,12 +260,22 @@ fn escape_quotes(s: &str) -> String {
 }
 
 #[get("/")]
-async fn index(_user: AuthenticatedUser, templates: &State<Templates>, flash: Option<FlashMessage<'_>>) -> RawHtml<String> {
+async fn index(
+    _user: AuthenticatedUser,
+    templates: &State<Templates>,
+    flash: Option<FlashMessage<'_>>,
+) -> RawHtml<String> {
     let message = flash.map(|flash| {
         let is_success = flash.kind() == "success";
         (flash.message().to_string(), is_success)
     });
-    render_home_page(templates, message.as_ref().map(|(msg, success)| (msg.as_str(), *success))).await
+    render_home_page(
+        templates,
+        message
+            .as_ref()
+            .map(|(msg, success)| (msg.as_str(), *success)),
+    )
+    .await
 }
 
 #[get("/", rank = 2)]
@@ -258,8 +304,11 @@ fn login_submit(
         set_auth_cookie(cookies);
         Ok(Redirect::to(uri!("/")))
     } else {
-        let error_html = r#"<div class="error-message">❌ Invalid password. Please try again.</div>"#;
-        Err(RawHtml(templates.login.replace("ERROR_PLACEHOLDER", error_html)))
+        let error_html =
+            r#"<div class="error-message">❌ Invalid password. Please try again.</div>"#;
+        Err(RawHtml(
+            templates.login.replace("ERROR_PLACEHOLDER", error_html),
+        ))
     }
 }
 
@@ -274,15 +323,60 @@ async fn create_account(
     _user: AuthenticatedUser,
     mut form: Form<CreateAccountForm<'_>>,
 ) -> Flash<Redirect> {
-    // Validate card number format
-    let card_number = form.card_number.trim().to_uppercase();
-    if card_number.is_empty() || card_number.len() < 8 || card_number.len() > 16 {
-        return Flash::error(Redirect::to(uri!("/")), "Invalid card number. Must be 8-16 hexadecimal characters.");
+    // Validate and parse card type
+    let card_type_str = form.card_type.trim().to_uppercase();
+    let card_type = match card_type_str.as_str() {
+        "MIFARE" => CardType::Mifare,
+        "FELICA" => CardType::Felica,
+        _ => {
+            return Flash::error(
+                Redirect::to(uri!("/")),
+                "Invalid card type. Must be MIFARE or FELICA.",
+            );
+        }
+    };
+
+    // Validate card ID format (hex only, even number of chars)
+    let card_id = form.card_number.trim().to_uppercase();
+    if card_id.is_empty() {
+        return Flash::error(Redirect::to(uri!("/")), "Card ID cannot be empty.");
+    }
+    if !card_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Flash::error(
+            Redirect::to(uri!("/")),
+            "Invalid card ID. Only hexadecimal characters (0-9, A-F) are allowed.",
+        );
+    }
+    if card_id.len() % 2 != 0 {
+        return Flash::error(
+            Redirect::to(uri!("/")),
+            "Invalid card ID. Must be an even number of hexadecimal characters.",
+        );
     }
 
-    if !card_number.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Flash::error(Redirect::to(uri!("/")), "Invalid card number. Only hexadecimal characters (0-9, A-F) are allowed.");
+    // Validate byte length based on card type
+    let byte_len = card_id.len() / 2;
+    match card_type {
+        CardType::Mifare => {
+            if byte_len < 4 || byte_len > 10 {
+                return Flash::error(
+                    Redirect::to(uri!("/")),
+                    "MIFARE card ID must be 4–10 bytes (8–20 hex characters).",
+                );
+            }
+        }
+        CardType::Felica => {
+            if byte_len != 8 {
+                return Flash::error(
+                    Redirect::to(uri!("/")),
+                    "FELICA card ID must be exactly 8 bytes (16 hex characters).",
+                );
+            }
+        }
     }
+
+    // Build the profile name used as the folder/identifier
+    let card_number = format!("{}_{}", card_type_str, card_id);
 
     // Validate display name
     let display_name = form.display_name.trim().to_string();
@@ -292,23 +386,35 @@ async fn create_account(
 
     // Validate short name
     let short_name = form.display_name_four_letters.trim().to_uppercase();
-    if short_name.is_empty() || short_name.len() > 4 || !short_name.chars().all(|c| c.is_ascii_alphabetic()) {
+    if short_name.is_empty()
+        || short_name.len() > 4
+        || !short_name.chars().all(|c| c.is_ascii_alphabetic())
+    {
         return Flash::error(Redirect::to(uri!("/")), "Short name must be 1-4 letters.");
     }
 
     // Check if account already exists
     if accounts::does_account_exist(&card_number) {
-        return Flash::error(Redirect::to(uri!("/")), "An account with this card number already exists.");
+        return Flash::error(
+            Redirect::to(uri!("/")),
+            "An account with this card number already exists.",
+        );
     }
-    
+
     // Get groovestats key
-    let gs_key = form.groovestats_api_key.as_ref().map(|s| s.trim()).unwrap_or("").to_string();
-    
+    let gs_key = form
+        .groovestats_api_key
+        .as_ref()
+        .map(|s| s.trim())
+        .unwrap_or("")
+        .to_string();
+
     // Process avatar if provided
     let (avatar_data, avatar_ext) = if let Some(ref mut avatar) = form.avatar {
         if avatar.len() > 0 {
             // Get file extension from content type or filename
-            let extension = avatar.content_type()
+            let extension = avatar
+                .content_type()
                 .and_then(|ct| match ct.to_string().as_str() {
                     "image/png" => Some("png".to_string()),
                     "image/jpeg" => Some("jpg".to_string()),
@@ -322,27 +428,40 @@ async fn create_account(
                         name.split('.').last().and_then(|ext| {
                             let ext_lower = ext.to_lowercase();
                             if ["png", "jpg", "jpeg", "bmp", "gif"].contains(&ext_lower.as_str()) {
-                                Some(if ext_lower == "jpeg" { "jpg".to_string() } else { ext_lower })
+                                Some(if ext_lower == "jpeg" {
+                                    "jpg".to_string()
+                                } else {
+                                    ext_lower
+                                })
                             } else {
                                 None
                             }
                         })
                     })
                 });
-            
+
             if let Some(ext) = extension {
                 if let Some(path) = avatar.path() {
                     match tokio::fs::read(path).await {
                         Ok(data) => (Some(data), Some(ext)),
                         Err(e) => {
-                            return Flash::error(Redirect::to(uri!("/")), format!("Failed to read avatar file: {}", e));
+                            return Flash::error(
+                                Redirect::to(uri!("/")),
+                                format!("Failed to read avatar file: {}", e),
+                            );
                         }
                     }
                 } else {
-                    return Flash::error(Redirect::to(uri!("/")), "Failed to access avatar file path.");
+                    return Flash::error(
+                        Redirect::to(uri!("/")),
+                        "Failed to access avatar file path.",
+                    );
                 }
             } else {
-                return Flash::error(Redirect::to(uri!("/")), "Unsupported avatar format. Use png, jpg, jpeg, bmp, or gif.");
+                return Flash::error(
+                    Redirect::to(uri!("/")),
+                    "Unsupported avatar format. Use png, jpg, jpeg, bmp, or gif.",
+                );
             }
         } else {
             (None, None)
@@ -353,15 +472,21 @@ async fn create_account(
 
     // Create the account
     match accounts::create_new_account(
-        &card_number, 
-        &display_name, 
-        &short_name, 
+        &card_number,
+        &display_name,
+        &short_name,
         &gs_key,
         avatar_data.as_deref(),
         avatar_ext.as_deref(),
     ) {
-        Ok(_) => Flash::success(Redirect::to(uri!("/")), format!("Account '{}' created successfully!", display_name)),
-        Err(e) => Flash::error(Redirect::to(uri!("/")), format!("Failed to create account: {}", e)),
+        Ok(_) => Flash::success(
+            Redirect::to(uri!("/")),
+            format!("Account '{}' created successfully!", display_name),
+        ),
+        Err(e) => Flash::error(
+            Redirect::to(uri!("/")),
+            format!("Failed to create account: {}", e),
+        ),
     }
 }
 
@@ -380,7 +505,10 @@ async fn update_account(
 
     // Validate short name
     let short_name = form.display_name_four_letters.trim().to_uppercase();
-    if short_name.is_empty() || short_name.len() > 4 || !short_name.chars().all(|c| c.is_ascii_alphabetic()) {
+    if short_name.is_empty()
+        || short_name.len() > 4
+        || !short_name.chars().all(|c| c.is_ascii_alphabetic())
+    {
         return Flash::error(Redirect::to(uri!("/")), "Short name must be 1-4 letters.");
     }
 
@@ -388,18 +516,23 @@ async fn update_account(
     if !accounts::does_account_exist(&card_number) {
         return Flash::error(Redirect::to(uri!("/")), "Account not found.");
     }
-    
+
     // Get groovestats key
     let groovestats_key = form.groovestats_api_key.as_ref().and_then(|s| {
         let trimmed = s.trim();
-        if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     });
-    
+
     // Process avatar if provided
     let (avatar_data, avatar_ext) = if let Some(ref mut avatar) = form.avatar {
         if avatar.len() > 0 {
             // Get file extension from content type or filename
-            let extension = avatar.content_type()
+            let extension = avatar
+                .content_type()
                 .and_then(|ct| match ct.to_string().as_str() {
                     "image/png" => Some("png".to_string()),
                     "image/jpeg" => Some("jpg".to_string()),
@@ -413,27 +546,40 @@ async fn update_account(
                         name.split('.').last().and_then(|ext| {
                             let ext_lower = ext.to_lowercase();
                             if ["png", "jpg", "jpeg", "bmp", "gif"].contains(&ext_lower.as_str()) {
-                                Some(if ext_lower == "jpeg" { "jpg".to_string() } else { ext_lower })
+                                Some(if ext_lower == "jpeg" {
+                                    "jpg".to_string()
+                                } else {
+                                    ext_lower
+                                })
                             } else {
                                 None
                             }
                         })
                     })
                 });
-            
+
             if let Some(ext) = extension {
                 if let Some(path) = avatar.path() {
                     match tokio::fs::read(path).await {
                         Ok(data) => (Some(data), Some(ext)),
                         Err(e) => {
-                            return Flash::error(Redirect::to(uri!("/")), format!("Failed to read avatar file: {}", e));
+                            return Flash::error(
+                                Redirect::to(uri!("/")),
+                                format!("Failed to read avatar file: {}", e),
+                            );
                         }
                     }
                 } else {
-                    return Flash::error(Redirect::to(uri!("/")), "Failed to access avatar file path.");
+                    return Flash::error(
+                        Redirect::to(uri!("/")),
+                        "Failed to access avatar file path.",
+                    );
                 }
             } else {
-                return Flash::error(Redirect::to(uri!("/")), "Unsupported avatar format. Use png, jpg, jpeg, bmp, or gif.");
+                return Flash::error(
+                    Redirect::to(uri!("/")),
+                    "Unsupported avatar format. Use png, jpg, jpeg, bmp, or gif.",
+                );
             }
         } else {
             (None, None)
@@ -452,8 +598,14 @@ async fn update_account(
     };
 
     match accounts::update_account_details(&card_number, updates) {
-        Ok(_) => Flash::success(Redirect::to(uri!("/")), format!("Account '{}' updated successfully!", display_name)),
-        Err(e) => Flash::error(Redirect::to(uri!("/")), format!("Failed to update account: {}", e)),
+        Ok(_) => Flash::success(
+            Redirect::to(uri!("/")),
+            format!("Account '{}' updated successfully!", display_name),
+        ),
+        Err(e) => Flash::error(
+            Redirect::to(uri!("/")),
+            format!("Failed to update account: {}", e),
+        ),
     }
 }
 
@@ -476,19 +628,25 @@ async fn delete_account(
 
     // Delete the account
     match accounts::delete_account(card_number) {
-        Ok(_) => Flash::success(Redirect::to(uri!("/")), format!("Account '{}' deleted successfully!", account_name)),
-        Err(e) => Flash::error(Redirect::to(uri!("/")), format!("Failed to delete account: {}", e)),
+        Ok(_) => Flash::success(
+            Redirect::to(uri!("/")),
+            format!("Account '{}' deleted successfully!", account_name),
+        ),
+        Err(e) => Flash::error(
+            Redirect::to(uri!("/")),
+            format!("Failed to delete account: {}", e),
+        ),
     }
 }
 
 #[post("/cards/insert", data = "<form>")]
-async fn insert_card(
-    _user: AuthenticatedUser,
-    form: Form<InsertCardForm>,
-) -> Flash<Redirect> {
+async fn insert_card(_user: AuthenticatedUser, form: Form<InsertCardForm>) -> Flash<Redirect> {
     // Check if cards are enabled
     if !cards_manager::is_enabled().await {
-        return Flash::error(Redirect::to(uri!("/")), "Card insertion is currently disabled.");
+        return Flash::error(
+            Redirect::to(uri!("/")),
+            "Card insertion is currently disabled.",
+        );
     }
 
     let card_number = form.card_number.trim();
@@ -498,20 +656,53 @@ async fn insert_card(
         return Flash::error(Redirect::to(uri!("/")), "Account not found.");
     }
 
+    // Parse card type and card ID from the profile name (e.g. "MIFARE_12345678")
+    let parts: Vec<&str> = card_number.splitn(2, '_').collect();
+    if parts.len() != 2 {
+        return Flash::error(Redirect::to(uri!("/")), "Invalid profile name format.");
+    }
+    let insert_card_type = match parts[0] {
+        "MIFARE" => CardType::Mifare,
+        "FELICA" => CardType::Felica,
+        _ => {
+            return Flash::error(
+                Redirect::to(uri!("/")),
+                "Unknown card type in profile name.",
+            );
+        }
+    };
+    let insert_card_id = parts[1].to_string();
+
     // Validate player number
     if form.player != 1 && form.player != 2 {
-        return Flash::error(Redirect::to(uri!("/")), "Invalid player number. Must be 1 or 2.");
+        return Flash::error(
+            Redirect::to(uri!("/")),
+            "Invalid player number. Must be 1 or 2.",
+        );
     }
 
     // Check if card is already inserted in any slot
     let p1_card = cards_manager::get_current_card_number_player1().await;
     let p2_card = cards_manager::get_current_card_number_player2().await;
 
-    if p1_card.as_ref().map_or(false, |c| c == card_number) {
-        return Flash::error(Redirect::to(uri!("/")), "This card is already inserted in Player 1 slot.");
+    let p1_profile = p1_card
+        .as_ref()
+        .map(|(ct, cid)| format!("{}_{}", ct.to_string(), cid));
+    let p2_profile = p2_card
+        .as_ref()
+        .map(|(ct, cid)| format!("{}_{}", ct.to_string(), cid));
+
+    if p1_profile.as_deref() == Some(card_number) {
+        return Flash::error(
+            Redirect::to(uri!("/")),
+            "This card is already inserted in Player 1 slot.",
+        );
     }
-    if p2_card.as_ref().map_or(false, |c| c == card_number) {
-        return Flash::error(Redirect::to(uri!("/")), "This card is already inserted in Player 2 slot.");
+    if p2_profile.as_deref() == Some(card_number) {
+        return Flash::error(
+            Redirect::to(uri!("/")),
+            "This card is already inserted in Player 2 slot.",
+        );
     }
 
     // Insert the card
@@ -520,22 +711,28 @@ async fn insert_card(
         .unwrap_or_else(|| card_number.to_string());
 
     if form.player == 1 {
-        cards_manager::set_current_card_number_player1(card_number.to_string()).await;
-        Flash::success(Redirect::to(uri!("/")), format!("Card '{}' inserted into Player 1 slot!", account_name))
+        cards_manager::set_current_card_number_player1(insert_card_type, insert_card_id).await;
+        Flash::success(
+            Redirect::to(uri!("/")),
+            format!("Card '{}' inserted into Player 1 slot!", account_name),
+        )
     } else {
-        cards_manager::set_current_card_number_player2(card_number.to_string()).await;
-        Flash::success(Redirect::to(uri!("/")), format!("Card '{}' inserted into Player 2 slot!", account_name))
+        cards_manager::set_current_card_number_player2(insert_card_type, insert_card_id).await;
+        Flash::success(
+            Redirect::to(uri!("/")),
+            format!("Card '{}' inserted into Player 2 slot!", account_name),
+        )
     }
 }
 
 #[post("/cards/remove", data = "<form>")]
-async fn remove_card(
-    _user: AuthenticatedUser,
-    form: Form<RemoveCardForm>,
-) -> Flash<Redirect> {
+async fn remove_card(_user: AuthenticatedUser, form: Form<RemoveCardForm>) -> Flash<Redirect> {
     // Validate player number
     if form.player != 1 && form.player != 2 {
-        return Flash::error(Redirect::to(uri!("/")), "Invalid player number. Must be 1 or 2.");
+        return Flash::error(
+            Redirect::to(uri!("/")),
+            "Invalid player number. Must be 1 or 2.",
+        );
     }
 
     if form.player == 1 {
@@ -557,10 +754,9 @@ pub fn build_rocket() -> rocket::Rocket<Build> {
     let config = Config::load().expect("Failed to load config.toml");
     let templates = Templates::load().expect("Failed to load templates");
 
-    rocket::build()
-        .manage(config)
-        .manage(templates)
-        .mount("/", routes![
+    rocket::build().manage(config).manage(templates).mount(
+        "/",
+        routes![
             index,
             index_redirect,
             login_page,
@@ -573,5 +769,6 @@ pub fn build_rocket() -> rocket::Rocket<Build> {
             insert_card,
             remove_card,
             get_avatar,
-        ])
+        ],
+    )
 }

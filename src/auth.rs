@@ -1,8 +1,7 @@
 use rocket::http::{Cookie, CookieJar, Status};
-use rocket::request::{self, FromRequest, Request};
 use rocket::outcome::IntoOutcome;
-use sha2::{Sha256, Digest};
-use hex;
+use rocket::request::{self, FromRequest, Request};
+use sha2::{Digest, Sha256};
 
 pub struct AuthenticatedUser;
 
@@ -42,4 +41,3 @@ pub fn set_auth_cookie(cookies: &CookieJar<'_>) {
 pub fn remove_auth_cookie(cookies: &CookieJar<'_>) {
     cookies.remove_private(Cookie::new("user_id", "authenticated"));
 }
-

@@ -1,3 +1,5 @@
+use crate::cards::card_type::CardType;
+
 fn accounts_dir() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     format!("{}/.itgmania_cards/accounts", home)
@@ -73,10 +75,13 @@ LastPlayedDate={LAST_PLAYED_DATE}
 Priority=0
 Type=Normal"#;
 
-const NEW_ACCOUNT_EMPTY_FOLDERS: [&str; 5] = ["EditCourses", "Edits", "LastGood", "Rivals", "Screenshots"];
+const NEW_ACCOUNT_EMPTY_FOLDERS: [&str; 5] =
+    ["EditCourses", "Edits", "LastGood", "Rivals", "Screenshots"];
 
 pub struct AccountDetails {
-    pub card_number: String,
+    pub card_number: String, // full profile name, e.g. "MIFARE_12345678"
+    pub card_type: String,   // e.g. "MIFARE" or "FELICA"
+    pub card_id: String,     // hex-only part, e.g. "12345678"
     pub display_name: String,
     pub display_name_four_letters: String,
     pub last_played_date: String,
@@ -104,17 +109,21 @@ pub fn does_account_exist(card_number: &str) -> bool {
     false
 }
 
-pub fn save_avatar(card_number: &str, avatar_data: &[u8], extension: &str) -> std::io::Result<String> {
+pub fn save_avatar(
+    card_number: &str,
+    avatar_data: &[u8],
+    extension: &str,
+) -> std::io::Result<String> {
     let profile_path = format!("{}/{}/ITGmania", accounts_dir(), card_number);
     std::fs::create_dir_all(&profile_path)?;
-    
+
     // Remove any existing avatar files
     let extensions = ["png", "jpg", "jpeg", "bmp", "gif"];
     for ext in extensions.iter() {
         let old_avatar_path = format!("{}/avatar.{}", profile_path, ext);
         let _ = std::fs::remove_file(&old_avatar_path); // Ignore if file doesn't exist
     }
-    
+
     let avatar_path = format!("{}/avatar.{}", profile_path, extension);
     std::fs::write(&avatar_path, avatar_data)?;
     Ok(format!("avatar.{}", extension))
@@ -123,31 +132,56 @@ pub fn save_avatar(card_number: &str, avatar_data: &[u8], extension: &str) -> st
 pub fn get_avatar_path(card_number: &str) -> Option<String> {
     let profile_path = format!("{}/{}/ITGmania", accounts_dir(), card_number);
     let extensions = ["png", "jpg", "jpeg", "bmp", "gif"];
-    
+
     for ext in extensions.iter() {
         let avatar_path = format!("{}/avatar.{}", profile_path, ext);
         if std::fs::metadata(&avatar_path).is_ok() {
             return Some(avatar_path);
         }
     }
-    
+
     None
 }
 
-pub fn create_new_account(card_number: &str, display_name: &str, display_name_four_letters: &str, groovestats_api_key: &str, avatar_data: Option<&[u8]>, avatar_extension: Option<&str>) -> std::io::Result<()> {
+pub fn create_new_account(
+    card_number: &str,
+    display_name: &str,
+    display_name_four_letters: &str,
+    groovestats_api_key: &str,
+    avatar_data: Option<&[u8]>,
+    avatar_extension: Option<&str>,
+) -> std::io::Result<()> {
     let account_path = format!("{}/{}/ITGmania", accounts_dir(), card_number);
     std::fs::create_dir_all(&account_path)?;
-    
+
     // Save avatar if provided
     if let (Some(data), Some(ext)) = (avatar_data, avatar_extension) {
         save_avatar(card_number, data, ext)?;
     }
 
-    std::fs::write(format!("{}/Editable.ini", account_path), NEW_ACCOUNT_EDITABLE_INI.replace("{DISPLAY_NAME}", display_name).as_str().replace("{DISPLAY_NAME_FOUR_LETTERS}", display_name_four_letters))?;
-    std::fs::write(format!("{}/GrooveStats.ini", account_path), NEW_ACCOUNT_GROOVESTATS_INI.replace("{GROOVESTATS_API_KEY}", groovestats_api_key))?;
-    std::fs::write(format!("{}/Simply Love UserPrefs.ini", account_path), NEW_ACCOUNT_SIMPLY_LOVE_USER_PREFS_INI)?;
+    std::fs::write(
+        format!("{}/Editable.ini", account_path),
+        NEW_ACCOUNT_EDITABLE_INI
+            .replace("{DISPLAY_NAME}", display_name)
+            .as_str()
+            .replace("{DISPLAY_NAME_FOUR_LETTERS}", display_name_four_letters),
+    )?;
+    std::fs::write(
+        format!("{}/GrooveStats.ini", account_path),
+        NEW_ACCOUNT_GROOVESTATS_INI.replace("{GROOVESTATS_API_KEY}", groovestats_api_key),
+    )?;
+    std::fs::write(
+        format!("{}/Simply Love UserPrefs.ini", account_path),
+        NEW_ACCOUNT_SIMPLY_LOVE_USER_PREFS_INI,
+    )?;
     std::fs::write(format!("{}/Stats.xml", account_path), NEW_ACCOUNT_STATS_XML)?;
-    std::fs::write(format!("{}/Type.ini", account_path), NEW_ACCOUNT_TYPE_INI.replace("{LAST_PLAYED_DATE}", &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()))?;
+    std::fs::write(
+        format!("{}/Type.ini", account_path),
+        NEW_ACCOUNT_TYPE_INI.replace(
+            "{LAST_PLAYED_DATE}",
+            &chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        ),
+    )?;
 
     for folder in NEW_ACCOUNT_EMPTY_FOLDERS.iter() {
         std::fs::create_dir_all(format!("{}/{}", account_path, folder))?;
@@ -176,18 +210,54 @@ pub fn get_account_details(card_number: &str) -> Option<AccountDetails> {
     let type_ini_path = format!("{}/Type.ini", account_path);
     let groovestats_ini_path = format!("{}/GrooveStats.ini", account_path);
 
-    if let (Ok(editable_ini), Ok(type_ini), Ok(groovestats_ini)) = (std::fs::read_to_string(editable_ini_path), std::fs::read_to_string(type_ini_path), std::fs::read_to_string(groovestats_ini_path)) {
-        let display_name = editable_ini.as_str().lines().find(|line| line.starts_with("DisplayName=")).and_then(|line| line.split('=').nth(1)).unwrap_or("").to_string();
-        let display_name_four_letters = editable_ini.as_str().lines().find(|line| line.starts_with("LastUsedHighScoreName=")).and_then(|line| line.split('=').nth(1)).unwrap_or("").to_string();
-        let last_played_date = type_ini.as_str().lines().find(|line| line.starts_with("LastPlayedDate=")).and_then(|line| line.split('=').nth(1)).unwrap_or("").to_string();
-        let has_groovestats_api_key = groovestats_ini.as_str().lines().find(|line| line.starts_with("ApiKey=")).and_then(|line| line.split('=').nth(1)).map_or(false, |key| !key.trim().is_empty());
+    if let (Ok(editable_ini), Ok(type_ini), Ok(groovestats_ini)) = (
+        std::fs::read_to_string(editable_ini_path),
+        std::fs::read_to_string(type_ini_path),
+        std::fs::read_to_string(groovestats_ini_path),
+    ) {
+        let display_name = editable_ini
+            .as_str()
+            .lines()
+            .find(|line| line.starts_with("DisplayName="))
+            .and_then(|line| line.split('=').nth(1))
+            .unwrap_or("")
+            .to_string();
+        let display_name_four_letters = editable_ini
+            .as_str()
+            .lines()
+            .find(|line| line.starts_with("LastUsedHighScoreName="))
+            .and_then(|line| line.split('=').nth(1))
+            .unwrap_or("")
+            .to_string();
+        let last_played_date = type_ini
+            .as_str()
+            .lines()
+            .find(|line| line.starts_with("LastPlayedDate="))
+            .and_then(|line| line.split('=').nth(1))
+            .unwrap_or("")
+            .to_string();
+        let has_groovestats_api_key = groovestats_ini
+            .as_str()
+            .lines()
+            .find(|line| line.starts_with("ApiKey="))
+            .and_then(|line| line.split('=').nth(1))
+            .map_or(false, |key| !key.trim().is_empty());
         let avatar_path = get_avatar_path(card_number).map(|path| {
             // Return just the filename relative to the profile directory
             path.split('/').last().unwrap_or("").to_string()
         });
 
+        let card_type = card_number.splitn(2, '_').next().unwrap_or("").to_string();
+        let card_id = card_number
+            .splitn(2, '_')
+            .nth(1)
+            .unwrap_or(card_number)
+            .to_string();
+
         return Some(AccountDetails {
             card_number: card_number.to_string(),
+            card_type,
+            card_id,
             display_name,
             display_name_four_letters,
             last_played_date,
@@ -216,38 +286,45 @@ pub fn list_accounts() -> Vec<AccountDetails> {
     accounts
 }
 
-pub fn update_account_details(card_number: &str, updates: UpdateAccountDetails) -> std::io::Result<()> {
+pub fn update_account_details(
+    card_number: &str,
+    updates: UpdateAccountDetails,
+) -> std::io::Result<()> {
     let account_path = format!("{}/{}/ITGmania", accounts_dir(), card_number);
     let editable_ini_path = format!("{}/Editable.ini", account_path);
     let groovestats_ini_path = format!("{}/GrooveStats.ini", account_path);
 
     if let Ok(editable_ini) = std::fs::read_to_string(&editable_ini_path) {
         let mut updated_ini = editable_ini.clone();
-        
+
         if let Some(display_name) = updates.display_name {
             // Extract current display name from INI
-            if let Some(current) = editable_ini.lines()
+            if let Some(current) = editable_ini
+                .lines()
                 .find(|line| line.starts_with("DisplayName="))
-                .and_then(|line| line.split('=').nth(1)) {
+                .and_then(|line| line.split('=').nth(1))
+            {
                 updated_ini = updated_ini.replace(
                     &format!("DisplayName={}", current),
                     &format!("DisplayName={}", display_name),
                 );
             }
         }
-        
+
         if let Some(display_name_four_letters) = updates.display_name_four_letters {
             // Extract current short name from INI
-            if let Some(current) = editable_ini.lines()
+            if let Some(current) = editable_ini
+                .lines()
                 .find(|line| line.starts_with("LastUsedHighScoreName="))
-                .and_then(|line| line.split('=').nth(1)) {
+                .and_then(|line| line.split('=').nth(1))
+            {
                 updated_ini = updated_ini.replace(
                     &format!("LastUsedHighScoreName={}", current),
                     &format!("LastUsedHighScoreName={}", display_name_four_letters),
                 );
             }
         }
-        
+
         std::fs::write(editable_ini_path, updated_ini)?;
     }
 
@@ -267,11 +344,20 @@ pub fn update_account_details(card_number: &str, updates: UpdateAccountDetails) 
             std::fs::write(groovestats_ini_path, updated_ini)?;
         }
     }
-    
+
     // Update avatar if provided
     if let (Some(data), Some(ext)) = (updates.avatar_data, updates.avatar_extension) {
         save_avatar(card_number, &data, &ext)?;
     }
 
     Ok(())
+}
+
+pub fn check_account_exists(card_type: &CardType, card_number: &str) -> bool {
+    std::fs::metadata(format!(
+        "{}/{}/ITGmania",
+        accounts_dir(),
+        format!("{}_{}", card_type.to_string(), card_number)
+    ))
+    .is_ok()
 }

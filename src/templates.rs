@@ -13,7 +13,3 @@ impl Templates {
         Ok(Templates { login, home })
     }
 }
-
-
-
-

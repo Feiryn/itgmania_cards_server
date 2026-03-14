@@ -18,4 +18,3 @@ impl Config {
         Ok(config)
     }
 }
-

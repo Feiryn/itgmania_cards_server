@@ -1,7 +1,7 @@
-use tokio::net::{UnixListener, UnixStream};
-use tokio::io::{AsyncWriteExt, AsyncBufReadExt, BufReader};
+use crate::cards::cards_manager;
 use std::path::PathBuf;
-use crate::cards_manager;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
 
 const SOCKET_PATH: &str = "/tmp/itgmania_cards.sock";
 
@@ -42,11 +42,11 @@ pub async fn run_unix_socket_server() {
 
 async fn handle_client(stream: UnixStream) {
     let mut reader = BufReader::new(stream);
-    
+
     // Keep reading commands until the client disconnects
     loop {
         let mut command = String::new();
-        
+
         // Read command from client
         match reader.read_line(&mut command).await {
             Ok(0) => {
@@ -55,18 +55,27 @@ async fn handle_client(stream: UnixStream) {
             }
             Ok(_) => {
                 let command = command.trim();
-                
+
                 // Handle commands
                 if command == "READ" {
                     // Get both player cards
                     let player1_card = cards_manager::get_current_card_number_player1().await;
                     let player2_card = cards_manager::get_current_card_number_player2().await;
 
-                    let p1 = player1_card.unwrap_or_else(|| "0".to_string());
-                    let p2 = player2_card.unwrap_or_else(|| "0".to_string());
-
-                    // Send the response: "player1_card,player2_card\n"
-                    let response = format!("{},{}\n", p1, p2);
+                    // Send the response
+                    let response = player1_card.map_or_else(
+                        || "0".to_string(),
+                        |(card_type, card_number)| {
+                            format!("{}_{}", card_type.to_string(), card_number)
+                        },
+                    ) + ","
+                        + &player2_card.map_or_else(
+                            || "0".to_string(),
+                            |(card_type, card_number)| {
+                                format!("{}_{}", card_type.to_string(), card_number)
+                            },
+                        )
+                        + "\n";
 
                     if let Err(e) = reader.write_all(response.as_bytes()).await {
                         eprintln!("Failed to write to socket: {}", e);
@@ -123,7 +132,8 @@ async fn handle_client(stream: UnixStream) {
                         return;
                     }
                 } else {
-                    let response = "ERROR: Unknown command (use: READ, RESET <1|2>, ENABLE, or DISABLE)\n";
+                    let response =
+                        "ERROR: Unknown command (use: READ, RESET <1|2>, ENABLE, or DISABLE)\n";
                     if let Err(e) = reader.write_all(response.as_bytes()).await {
                         eprintln!("Failed to write to socket: {}", e);
                         return;
@@ -137,6 +147,3 @@ async fn handle_client(stream: UnixStream) {
         }
     }
 }
-
-
-

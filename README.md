@@ -26,11 +26,15 @@ The server can handle several commands, such as:
 
 ### NFC card reader
 
-This is yet to be implemented, but the idea is to use two NFC card readers, one for each player, to read the cards and update which cards are inserted in the server.
+This project supports for now only custom arduino-based NFC card readers. The reader is connected to the server via a serial port and sends the card ID when a card is inserted. Please see the double PN532 reader on my github profile.
 
-For now, the cards can be manually inserted via buttons on the accounts list page in the web server.
+For more information about the implementation, or if you want to implement your own reader, please look at [./src/reader](./src/reader).
 
-The buttons are available only if the server is enabled, which means that ITGmania has been launched and has sent the `ENABLE` command.
+You can also insert cards manually using the web server when testing or if you don't have a card reader.
+
+Please also note that cards can only be inserted when an ITGmania session is active.
+
+Currently supported card types are Mifare and Felica.
 
 ## Installation
 
@@ -53,7 +57,7 @@ or
 cargo build --release
 ```
 
-If you build the project in release mode, don't forget to copy the `config.toml` and `Rocket.toml` files to the same directory as the executable.
+If you build the project in release mode, don't forget to copy the `config.toml`, `Rocket.toml` and `reader.toml` files to the same directory as the executable.
 
 #### ITGmania
 
@@ -74,6 +78,8 @@ MemoryCardUsbBusP2=2
 The password hash is stored in `config.toml` at the same level as the executable.
 
 The server configuration is stored in `Rocket.toml` at the same level as the executable.
+
+The reader configuration is stored in `reader.toml` at the same level as the executable. If you don't have a reader, you can leave the type as `none`.
 
 ## Screenshots
 
